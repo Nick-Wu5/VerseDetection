@@ -33,7 +33,7 @@ class BibleVerseDetector:
     
     def detect_verse_blocks(self, text: str) -> List[VerseBlock]:
         """
-        Detect verse blocks in the given text.
+        Detect verse blocks in the given text, handling multi-line verses.
         
         Args:
             text: Raw OCR text from the Bible page
@@ -43,6 +43,8 @@ class BibleVerseDetector:
         """
         lines = text.split('\n')
         verse_blocks = []
+        current_verse = None
+        current_lines = []
         
         for line in lines:
             line = line.strip()
@@ -51,18 +53,32 @@ class BibleVerseDetector:
                 
             # Check if line starts with a verse number
             verse_number = self._extract_verse_number(line)
+            
             if verse_number:
-                # Extract the content after the verse number
-                content = self._extract_content(line, verse_number)
-                confidence = self._calculate_confidence(line, verse_number)
+                # Save previous verse if exists
+                if current_verse:
+                    verse_block = self._create_verse_block(current_verse, current_lines)
+                    verse_blocks.append(verse_block)
                 
-                verse_block = VerseBlock(
-                    text=line,
-                    verse_number=verse_number,
-                    content=content,
-                    confidence=confidence
-                )
-                verse_blocks.append(verse_block)
+                # Start new verse
+                current_verse = verse_number
+                current_lines = [line]
+            elif current_verse and self._is_verse_continuation(line):
+                # Continue current verse
+                current_lines.append(line)
+            else:
+                # This might be commentary or other content
+                # Save current verse and start fresh
+                if current_verse:
+                    verse_block = self._create_verse_block(current_verse, current_lines)
+                    verse_blocks.append(verse_block)
+                current_verse = None
+                current_lines = []
+        
+        # Don't forget the last verse
+        if current_verse:
+            verse_block = self._create_verse_block(current_verse, current_lines)
+            verse_blocks.append(verse_block)
         
         return verse_blocks
     
@@ -74,20 +90,76 @@ class BibleVerseDetector:
                 return match.group(1).strip()
         return ""
     
-    def _extract_content(self, line: str, verse_number: str) -> str:
-        """Extract the content after the verse number"""
-        # Remove the verse number from the beginning
-        content = line[len(verse_number):].strip()
-        return content
+    def _is_verse_continuation(self, line: str) -> bool:
+        """Determine if a line continues the current verse"""
+        line = line.strip()
+        
+        # Skip empty lines
+        if not line:
+            return False
+        
+        # Check for indentation (starts with spaces/tabs)
+        if line.startswith((' ', '\t')):
+            return True
+        
+        # Check if line doesn't start with a verse number
+        if self._extract_verse_number(line):
+            return False
+        
+        # Check for sentence continuation patterns
+        # (doesn't start with capital letter, ends with comma, etc.)
+        if not line[0].isupper():
+            return True
+        
+        # Check for punctuation that suggests continuation
+        if line.endswith((',', ';', ':')):
+            return True
+        
+        # Check if line is short (likely continuation)
+        if len(line) < 50:
+            return True
+        
+        return False
     
-    def _calculate_confidence(self, line: str, verse_number: str) -> float:
+    def _create_verse_block(self, verse_number: str, lines: List[str]) -> VerseBlock:
+        """Create a VerseBlock from verse number and multiple lines"""
+        full_text = '\n'.join(lines)
+        content = self._extract_content_from_lines(lines, verse_number)
+        confidence = self._calculate_confidence(full_text, verse_number)
+        
+        return VerseBlock(
+            text=full_text,
+            verse_number=verse_number,
+            content=content,
+            confidence=confidence
+        )
+    
+    def _extract_content_from_lines(self, lines: List[str], verse_number: str) -> str:
+        """Extract content from multiple lines, removing verse numbers"""
+        content_lines = []
+        
+        for line in lines:
+            # Remove verse number from first line only
+            if line.strip().startswith(verse_number):
+                content = line[len(verse_number):].strip()
+            else:
+                content = line.strip()
+            
+            if content:
+                content_lines.append(content)
+        
+        return ' '.join(content_lines)
+    
+    def _calculate_confidence(self, text: str, verse_number: str) -> float:
         """Calculate confidence score for verse detection"""
         confidence = 0.0
         
-        # Higher confidence for longer content
-        content_length = len(line) - len(verse_number)
-        if content_length > 10:
+        # Calculate total content length (all lines)
+        content_length = len(text) - len(verse_number)
+        if content_length > 20:
             confidence += 0.3
+        elif content_length > 10:
+            confidence += 0.2
         
         # Higher confidence for specific patterns
         if ':' in verse_number:  # Chapter:verse format
@@ -105,22 +177,11 @@ class BibleVerseDetector:
     
     def filter_main_text(self, text: str) -> str:
         """
-        Filter text to keep only lines that contain verse numbers.
+        Filter text to keep only verses, handling multi-line verses.
         This helps remove commentary and other non-Bible text.
         """
-        lines = text.split('\n')
-        filtered_lines = []
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            # Check if line contains a verse number
-            if self._extract_verse_number(line):
-                filtered_lines.append(line)
-        
-        return '\n'.join(filtered_lines)
+        verse_blocks = self.detect_verse_blocks(text)
+        return '\n\n'.join(block.text for block in verse_blocks)
     
     def get_verse_statistics(self, text: str) -> Dict:
         """Get statistics about verse detection"""
@@ -131,29 +192,7 @@ class BibleVerseDetector:
             'verse_blocks': len(verse_blocks),
             'verse_numbers': [block.verse_number for block in verse_blocks],
             'average_confidence': sum(block.confidence for block in verse_blocks) / len(verse_blocks) if verse_blocks else 0,
-            'filtered_text': self.filter_main_text(text)
+            'filtered_text': '\n\n'.join(block.text for block in verse_blocks)
         }
         
         return stats
-
-# Example usage and testing
-if __name__ == "__main__":
-    detector = BibleVerseDetector()
-    
-    # Test with sample Bible text
-    sample_text = """
-    1 The Lord is my shepherd, I shall not want.
-    2 He makes me lie down in green pastures,
-    he leads me beside quiet waters,
-    3 he refreshes my soul.
-    He guides me along the right paths
-    for his name's sake.
-    """
-    
-    print("Testing verse detection:")
-    stats = detector.get_verse_statistics(sample_text)
-    print(f"Found {stats['verse_blocks']} verse blocks")
-    print(f"Verse numbers: {stats['verse_numbers']}")
-    print(f"Average confidence: {stats['average_confidence']:.2f}")
-    print("\nFiltered text:")
-    print(stats['filtered_text']) 
