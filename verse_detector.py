@@ -150,6 +150,24 @@ class BibleVerseDetector:
         
         return ' '.join(content_lines)
     
+    def _is_valid_verse_number(self, verse_number: str) -> bool:
+        """Validate verse number against Bible limits"""
+        try:
+            # Handle chapter:verse format (e.g., "1:1", "Psalm 139:1")
+            if ':' in verse_number:
+                parts = verse_number.split(':')
+                if len(parts) != 2:
+                    return False
+                chapter = int(parts[0].split()[-1])  # Handle "Psalm 139:1" -> "139"
+                verse = int(parts[1])
+                return 1 <= chapter <= 150 and 1 <= verse <= 176
+            else:
+                # Simple verse number
+                num = int(verse_number)
+                return 1 <= num <= 176
+        except (ValueError, IndexError):
+            return False
+    
     def _calculate_confidence(self, text: str, verse_number: str) -> float:
         """Calculate confidence score for verse detection"""
         confidence = 0.0
@@ -169,30 +187,66 @@ class BibleVerseDetector:
         elif any(word in verse_number.lower() for word in ['psalm', 'john', 'matthew', 'mark', 'luke']):
             confidence += 0.5  # Book names
             
+        # Add validation scoring
+        if self._is_valid_verse_number(verse_number):
+            confidence += 0.3  # Valid verse number
+            # Bonus for common verse numbers (1-50)
+            try:
+                if ':' in verse_number:
+                    verse = int(verse_number.split(':')[1])
+                else:
+                    verse = int(verse_number)
+                if 1 <= verse <= 50:
+                    confidence += 0.1  # Common range bonus
+            except (ValueError, IndexError):
+                pass
+        else:
+            confidence -= 0.8  # Invalid verse number penalty
+            
         # Penalize very short content
         if content_length < 5:
             confidence -= 0.2
             
         return min(confidence, 1.0)
     
-    def filter_main_text(self, text: str) -> str:
+    def filter_main_text(self, text: str, confidence_threshold: float = 0.3) -> str:
         """
-        Filter text to keep only verses, handling multi-line verses.
+        Filter text to keep only high-confidence verses, handling multi-line verses.
         This helps remove commentary and other non-Bible text.
         """
         verse_blocks = self.detect_verse_blocks(text)
-        return '\n\n'.join(block.text for block in verse_blocks)
+        high_confidence_blocks = [block for block in verse_blocks if block.confidence >= confidence_threshold]
+        return '\n\n'.join(block.text for block in high_confidence_blocks)
     
-    def get_verse_statistics(self, text: str) -> Dict:
-        """Get statistics about verse detection"""
+    def get_verse_statistics(self, text: str, confidence_threshold: float = 0.3) -> Dict:
+        """Get statistics about verse detection with confidence-based filtering"""
         verse_blocks = self.detect_verse_blocks(text)
+        
+        # Filter verses based on confidence threshold
+        high_confidence_blocks = [block for block in verse_blocks if block.confidence >= confidence_threshold]
+        low_confidence_blocks = [block for block in verse_blocks if block.confidence < confidence_threshold]
+        
+        # Calculate validation statistics
+        valid_verse_blocks = [block for block in verse_blocks if self._is_valid_verse_number(block.verse_number)]
+        invalid_verse_blocks = [block for block in verse_blocks if not self._is_valid_verse_number(block.verse_number)]
         
         stats = {
             'total_lines': len(text.split('\n')),
             'verse_blocks': len(verse_blocks),
+            'high_confidence_blocks': len(high_confidence_blocks),
+            'low_confidence_blocks': len(low_confidence_blocks),
+            'valid_verse_blocks': len(valid_verse_blocks),
+            'invalid_verse_blocks': len(invalid_verse_blocks),
             'verse_numbers': [block.verse_number for block in verse_blocks],
+            'high_confidence_verse_numbers': [block.verse_number for block in high_confidence_blocks],
+            'low_confidence_verse_numbers': [block.verse_number for block in low_confidence_blocks],
+            'invalid_verse_numbers': [block.verse_number for block in invalid_verse_blocks],
             'average_confidence': sum(block.confidence for block in verse_blocks) / len(verse_blocks) if verse_blocks else 0,
-            'filtered_text': '\n\n'.join(block.text for block in verse_blocks)
+            'average_high_confidence': sum(block.confidence for block in high_confidence_blocks) / len(high_confidence_blocks) if high_confidence_blocks else 0,
+            'validation_rate': len(valid_verse_blocks) / len(verse_blocks) if verse_blocks else 0,
+            'filtered_text': '\n\n'.join(block.text for block in high_confidence_blocks),
+            'all_text': '\n\n'.join(block.text for block in verse_blocks),
+            'confidence_threshold': confidence_threshold
         }
         
         return stats
