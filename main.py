@@ -11,7 +11,11 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.getenv("GOOGLE_APPLICATION_CRE
 client = vision.ImageAnnotatorClient()
 
 # Load Bible page image
-IMAGE_PATH = "Photos/proverbs_31.jpeg"
+# IMAGE_PATH = "Photos/proverbs_31.jpeg"
+# IMAGE_PATH = "Photos/proverbs_12.jpeg"
+IMAGE_PATH = "Photos/proverbs_27.jpeg"
+# IMAGE_PATH = "Photos/psalm_139.jpeg"
+
 with open(IMAGE_PATH, 'rb') as image_file:
     content = image_file.read()
 image = vision.Image(content=content)
@@ -24,7 +28,7 @@ annotation = response.full_text_annotation
 detector = BibleVerseDetector()
 
 # Get verse statistics with confidence filtering
-stats = detector.get_verse_statistics(annotation.text, confidence_threshold=0.5)
+stats = detector.get_verse_statistics(annotation.text, confidence_threshold=0.6)  # Increased from 0.5
 
 print("=== OCR Results ===")
 print(f"Total lines detected: {stats['total_lines']}")
