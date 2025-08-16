@@ -41,13 +41,15 @@ class BibleVerseDetector:
     
     def __init__(self):
         # Common verse number patterns
+        # Updated to support numbered and multi-word book names (e.g., "2 Samuel 19:42", "1 Corinthians 13:4")
         self.verse_patterns = [
             # Standard verse numbers: 1, 2, 3, etc.
             r'^\s*(\d+)\s+',
             # Chapter:verse format: 1:1, 2:3, etc.
             r'^\s*(\d+:\d+)\s+',
-            # Book chapter:verse: Psalm 139:1, John 3:16, etc.
-            r'^\s*([A-Za-z]+\s+\d+:\d+)\s+',
+            # Book chapter:verse with optional numeric prefix and multi-word book name
+            # Examples: "Psalm 139:1", "John 3:16", "2 Samuel 19:42", "1 Corinthians 13:4"
+            r'^\s*((?:[1-3]\s*)?[A-Za-z]+(?:\s+[A-Za-z]+)*\s+\d+:\d+)\s+',
             # Roman numerals: I, II, III, etc.
             r'^\s*([IVX]+)\s+',
             # Chapter numbers: Chapter 1, Chapter 2, etc.

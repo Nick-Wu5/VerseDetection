@@ -6,6 +6,7 @@ and compare results with actual Bible verses (NIV translation)
 
 import os
 import json
+import re
 from google.cloud import vision
 from dotenv import load_dotenv
 from verse_detector import BibleVerseDetector
@@ -138,6 +139,17 @@ ACTUAL_VERSES = {
     }
 }
 
+# Load optional NIV translations from JSON (keys should match image_name without extension)
+try:
+    _json_path = os.path.join(os.path.dirname(__file__), 'niv_translations.json')
+    if os.path.exists(_json_path):
+        with open(_json_path, 'r') as _f:
+            _loaded = json.load(_f)
+            if isinstance(_loaded, dict):
+                ACTUAL_VERSES.update(_loaded)
+except Exception as _e:
+    logging.warning(f"Could not load NIV translations JSON: {_e}")
+
 def process_image(image_path):
     """Process a single image and return verse detection results"""
     logging.info(f"Processing image: {image_path}")
@@ -261,6 +273,115 @@ def compare_with_actual_verses(detected_verses, actual_verses, image_name, all_t
     
     return comparison_results
 
+def parse_image_filename(image_name: str):
+    """Parse filenames like 'book_13(19-22)_14(1-5)' into expected chapter/verse ranges.
+
+    Supports numbered books without spaces (e.g., '2samuel') and multi-chapter pages.
+
+    Returns a dict:
+      {
+        'book': '2samuel',
+        'chapters': [
+            {'chapter': 19, 'verses': (42, 43)},
+            {'chapter': 20, 'verses': (1, 9)}
+        ],
+        'expected_verses_union': set([...])  # union of all verse numbers across chapters
+      }
+    """
+    # Strip extension if present
+    base = image_name
+    for ext in ('.jpeg', '.jpg', '.png'):
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+            break
+
+    if '_' not in base:
+        return None
+
+    # Split on first underscore: book vs chapter specs
+    first_us = base.find('_')
+    book = base[:first_us].lower()
+    tail = base[first_us + 1:]
+
+    # Find all chapter(range) specs like 13(19-22) or 3(31)
+    # Pattern: chapter digits, then '(', then start, optional '-end', then ')'
+    pattern = re.compile(r"(\d+)\((\d+)(?:-(\d+))?\)")
+    chapters = []
+    expected_union = set()
+
+    for match in pattern.finditer(tail):
+        chapter_str, start_str, end_str = match.groups()
+        chapter = int(chapter_str)
+        start = int(start_str)
+        end = int(end_str) if end_str else start
+
+        chapters.append({'chapter': chapter, 'verses': (start, end)})
+        expected_union.update(range(start, end + 1))
+
+    if not chapters:
+        return None
+
+    return {
+        'book': book,
+        'chapters': chapters,
+        'expected_verses_union': expected_union,
+    }
+
+def _extract_detected_verse_number(verse_token: str):
+    """Map detected verse tokens to an integer verse number if possible.
+
+    Handles formats like '17', '1:3', 'Psalm 139:1'. Returns None if not parseable.
+    """
+    token = verse_token.strip()
+    # Fast path: simple number
+    if token.isdigit():
+        try:
+            return int(token)
+        except ValueError:
+            return None
+
+    # If contains a colon, attempt to parse the part after the last ':'
+    if ':' in token:
+        try:
+            verse_part = token.split(':')[-1]
+            return int(verse_part)
+        except ValueError:
+            return None
+
+    return None
+
+def compare_with_expected_ranges(detected_verses, expected_spec):
+    """Compare detected verse numbers to expected ranges parsed from filename.
+
+    detected_verses: list of strings from detector (e.g., ['17', '18', 'Psalm 140:2'])
+    expected_spec: dict from parse_image_filename
+    """
+    expected_set = set(expected_spec.get('expected_verses_union', set()))
+
+    parsed_detected = []
+    for v in detected_verses:
+        num = _extract_detected_verse_number(v)
+        if num is not None:
+            parsed_detected.append(num)
+
+    detected_set = set(parsed_detected)
+    matches = sorted(expected_set.intersection(detected_set))
+    missing = sorted(expected_set.difference(detected_set))
+    extras = sorted(detected_set.difference(expected_set))
+
+    accuracy = (len(matches) / len(expected_set)) if expected_set else 0.0
+
+    return {
+        'book': expected_spec['book'],
+        'chapters': expected_spec['chapters'],
+        'expected_verses': sorted(expected_set),
+        'detected_verses_numeric': sorted(detected_set),
+        'matches': matches,
+        'missing_verses': missing,
+        'extra_detected_verses': extras,
+        'accuracy_score_numeric': accuracy,
+    }
+
 def calculate_similarity(text1, text2):
     """Calculate similarity between two texts (simple implementation)"""
     if not text1 or not text2:
@@ -299,7 +420,7 @@ def main():
             if result:
                 results[image_name] = result
                 
-                # Compare with actual verses
+                # Compare with actual verses when textual ground truth exists
                 if image_name in ACTUAL_VERSES:
                     comparison = compare_with_actual_verses(
                         result['high_confidence_verse_numbers'],
@@ -308,6 +429,16 @@ def main():
                         result['all_text'] # Pass all_text to the comparison function
                     )
                     results[image_name]['comparison'] = comparison
+                
+                # Fallback: use filename to compute expected numeric ranges
+                parsed = parse_image_filename(filename)
+                if parsed:
+                    numeric_comp = compare_with_expected_ranges(
+                        result['high_confidence_verse_numbers'],
+                        parsed
+                    )
+                    results[image_name]['expected_from_filename'] = parsed
+                    results[image_name]['expected_comparison'] = numeric_comp
                 
                 # Log detailed results
                 logging.info(f"Results for {image_name}:")
@@ -356,6 +487,17 @@ def main():
                     
                     if comp['extra_verses']:
                         logging.info(f"  - Extra verses: {comp['extra_verses']}")
+                
+                if 'expected_comparison' in results[image_name]:
+                    ncomp = results[image_name]['expected_comparison']
+                    ch_list = ", ".join(
+                        [f"{c['chapter']}({c['verses'][0]}-{c['verses'][1]})" for c in ncomp['chapters']]
+                    )
+                    logging.info(f"  - Expected (filename): chapters {ch_list}")
+                    logging.info(f"  - Numeric accuracy: {ncomp['accuracy_score_numeric']:.3f}")
+                    logging.info(f"  - Numeric matches: {len(ncomp['matches'])}")
+                    logging.info(f"  - Numeric missing: {len(ncomp['missing_verses'])}")
+                    logging.info(f"  - Numeric extras: {len(ncomp['extra_detected_verses'])}")
     
     # Save results to JSON file
     with open('verse_detection_results.json', 'w') as f:
@@ -380,6 +522,17 @@ def main():
             print(f"   Partial matches: {len(comp['partial_matches'])}")
             print(f"   Missing verses: {len(comp['missing_verses'])}")
             print(f"   Extra verses: {len(comp['extra_verses'])}")
+
+        if 'expected_comparison' in result:
+            ncomp = result['expected_comparison']
+            ch_list = ", ".join(
+                [f"{c['chapter']}({c['verses'][0]}-{c['verses'][1]})" for c in ncomp['chapters']]
+            )
+            print(f"   Expected from filename: {result['expected_from_filename']['book']} {ch_list}")
+            print(f"   Numeric accuracy (vs. filename ranges): {ncomp['accuracy_score_numeric']:.1%}")
+            print(f"   Numeric matches: {len(ncomp['matches'])}")
+            print(f"   Numeric missing: {len(ncomp['missing_verses'])}")
+            print(f"   Numeric extras: {len(ncomp['extra_detected_verses'])}")
         
         print(f"   High confidence verse numbers: {result['high_confidence_verse_numbers']}")
         
