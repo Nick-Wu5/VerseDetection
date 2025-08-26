@@ -1,5 +1,31 @@
 import cv2 as cv
 import numpy as np
+from google.cloud import vision
+from typing import List, Dict, Tuple
+import os
+import sys
+
+def check_google_vision_auth():
+    """Check if Google Cloud Vision API authentication is properly configured."""
+    credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+    if not credentials_path:
+        print("❌ GOOGLE_APPLICATION_CREDENTIALS environment variable not set")
+        print("Please set it to your service account key file path:")
+        print("export GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/key.json")
+        return False
+    
+    if not os.path.exists(credentials_path):
+        print(f"❌ Credentials file not found: {credentials_path}")
+        return False
+    
+    try:
+        # Test the client
+        client = vision.ImageAnnotatorClient()
+        print("✅ Google Cloud Vision API authentication successful")
+        return True
+    except Exception as e:
+        print(f"❌ Error authenticating with Google Cloud Vision API: {e}")
+        return False
 
 def merge_line_group(line_group):
     """Merge a group of close line segments into a single line."""
@@ -57,9 +83,93 @@ def merge_nearby_segments(lines, y_threshold=15, x_gap=50):
     
     return merged
 
+def get_text_above_underlines(underlines: List, original_image: np.ndarray, search_height: int = 50) -> Dict[int, str]:
+    """
+    Extract text regions above each detected underline using Google Cloud Vision API.
+    
+    Args:
+        underlines: List of detected underline coordinates [(x1, y1, x2, y2), ...]
+        original_image: Original BGR image for OCR processing
+        search_height: Vertical distance above underline to search for text (default: 50px)
+    
+    Returns:
+        Dictionary mapping underline index to extracted text
+    """
+    text_regions = {}
+    
+    # Initialize Google Cloud Vision client
+    client = vision.ImageAnnotatorClient()
+    
+    for i, line in enumerate(underlines):
+        x1, y1, x2, y2 = line[0]
+        y_underline = int(y1)  # y-coordinate of the underline
+        
+        # Define search region above the underline
+        y_start = max(0, y_underline - search_height)
+        y_end = y_underline
+        
+        # Extract text region above this underline from original image
+        text_region = original_image[y_start:y_end, x1:x2]
+        
+        try:
+            # Convert BGR to RGB (Google Cloud Vision expects RGB)
+            text_region_rgb = cv.cvtColor(text_region, cv.COLOR_BGR2RGB)
+            
+            # Convert to bytes for Google Cloud Vision API
+            success, buffer = cv.imencode('.png', text_region_rgb)
+            if not success:
+                print(f"Error encoding image for underline {i}")
+                text_regions[i] = ""
+                continue
+                
+            image_bytes = buffer.tobytes()
+            
+            # Create image object for Google Cloud Vision
+            image = vision.Image(content=image_bytes)
+            
+            # Perform text detection
+            response = client.text_detection(image=image)
+            
+            # Check for API errors
+            if hasattr(response, 'error') and response.error.message:
+                print(f"Underline {i}: Google Cloud Vision API error: {response.error.message}")
+                text_regions[i] = ""
+                continue
+                
+            texts = response.text_annotations
+            
+            if texts:
+                # Get the first (and usually only) text annotation
+                extracted_text = texts[0].description.strip()
+                if extracted_text:
+                    text_regions[i] = extracted_text
+                    print(f"Underline {i}: Found text '{extracted_text}' above underline at y={y_underline}")
+                else:
+                    print(f"Underline {i}: No text found above underline at y={y_underline}")
+                    text_regions[i] = ""
+            else:
+                print(f"Underline {i}: No text detected above underline at y={y_underline}")
+                text_regions[i] = ""
+                
+        except Exception as e:
+            print(f"Error extracting text for underline {i}: {e}")
+            text_regions[i] = ""
+    
+    return text_regions
+
+# Check Google Cloud Vision API authentication first
+if not check_google_vision_auth():
+    print("\n❌ Cannot proceed without proper Google Cloud Vision API authentication.")
+    print("Please follow the setup instructions and try again.")
+    sys.exit(1)
+
 IMAGE_PATH = "Photos/proverbs_27(4-23).jpeg"
 
 img = cv.imread(IMAGE_PATH)
+if img is None:
+    print(f"❌ Error: Could not load image from {IMAGE_PATH}")
+    sys.exit(1)
+    
 height, width = img.shape[:2]
 
 # 1) Prep
@@ -137,10 +247,22 @@ if lines is not None:
     
     cv.imshow("Detected Underlines", result_img)
     print(f"Detected {len(horizontal_lines)} underlines")
+    
+    # Phase 1: Extract text above underlines
+    print("\n=== Phase 1: Extracting Text Above Underlines ===")
+    text_regions = get_text_above_underlines(horizontal_lines, img)
+    
+    if text_regions:
+        print(f"\nExtracted text from {len(text_regions)} underlines:")
+        for underline_idx, text in text_regions.items():
+            print(f"  Underline {underline_idx}: '{text}'")
+    else:
+        print("No text extracted from underlines")
+        
 else:
     print("No underlines detected")
     cv.imshow("Detected Underlines", result_img)
 
-print("Press any key to close")
+print("\nPress any key to close")
 cv.waitKey(0)
 cv.destroyAllWindows()
